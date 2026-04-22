@@ -14,7 +14,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  UPSTREAM_REPO: Yaolin-Wang/aitd
+  UPSTREAM_REPO: Yaolinwang/AITD
 
 jobs:
   sync-upstream:
