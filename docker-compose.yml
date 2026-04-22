@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  aitd:
+    # 本地构建使用 build: .
+    # GitHub 镜像使用 image: ghcr.io/rdone4425/aitd:main
+    build: .
+    # image: ghcr.io/rdone4425/aitd:main
+    container_name: aitd-trading
+    ports:
+      - "8788:8788"
+    volumes:
+      # 持久化数据
+      - ./data:/app/data
+      # 可选：挂载配置方便修改
+      - ./config:/app/config
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
