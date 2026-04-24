@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
 from .config import (
@@ -636,12 +635,15 @@ def normalize_model_decision(
         decision = str(item.get("decision") or "hold").strip().lower()
         if decision not in {"hold", "close", "reduce", "update"}:
             decision = "hold"
+        reduce_fraction = None
+        if decision == "reduce":
+            reduce_fraction = clamp(item.get("reduceFraction"), 0.05, 0.95)
         normalized_positions.append(
             {
                 "symbol": symbol,
                 "decision": decision,
                 "reason": str(item.get("reason") or ""),
-                "reduceFraction": clamp(item.get("reduceFraction"), 0.05, 0.95),
+                "reduceFraction": reduce_fraction,
                 "stopLoss": num(item.get("stopLoss")),
                 "takeProfit": num(item.get("takeProfit")),
             }
@@ -654,7 +656,7 @@ def normalize_model_decision(
                     "symbol": symbol,
                     "decision": "hold",
                     "reason": "No explicit model instruction; defaulting to hold.",
-                    "reduceFraction": 0.25,
+                    "reduceFraction": None,
                     "stopLoss": None,
                     "takeProfit": None,
                 }
@@ -1475,16 +1477,69 @@ def preview_trading_prompt_decision(mode_override: str | None = None, prompt_ove
         "parsed": parsed_model,
         "provider": model_result["provider"],
     }
+def _parse_iso_timestamp(value: Any) -> float | None:
+    if not value:
+        return None
+    try:
+        return __import__("datetime").datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return None
 
 
-def summarize_book_history(book: dict[str, Any]) -> dict[str, Any]:
+def archived_decision_timeline(mode: str, session_started_at: str | None, limit: int = 1000) -> list[dict[str, Any]]:
+    if not DECISIONS_DIR.exists():
+        return []
+    started_ts = _parse_iso_timestamp(session_started_at)
+    started_date = None
+    if session_started_at:
+        try:
+            started_date = str(session_started_at)[:10]
+        except Exception:
+            started_date = None
+    rows: list[dict[str, Any]] = []
+    for day_dir in sorted(DECISIONS_DIR.iterdir()):
+        if not day_dir.is_dir():
+            continue
+        if started_date and day_dir.name < started_date:
+            continue
+        for path in sorted(day_dir.glob("*.json")):
+            payload = read_json(path, {})
+            if not isinstance(payload, dict):
+                continue
+            if clean_mode(payload.get("mode")) != clean_mode(mode):
+                continue
+            finished_at = payload.get("finishedAt") or payload.get("startedAt")
+            finished_ts = _parse_iso_timestamp(finished_at)
+            if started_ts is not None and finished_ts is not None and finished_ts < started_ts:
+                continue
+            rows.append(
+                {
+                    "id": str(payload.get("id") or path.stem),
+                    "startedAt": payload.get("startedAt"),
+                    "finishedAt": payload.get("finishedAt"),
+                    "actions": payload.get("actions") if isinstance(payload.get("actions"), list) else [],
+                    "equityUsd": num(payload.get("accountAfter", {}).get("equityUsd")),
+                }
+            )
+    rows.sort(
+        key=lambda item: (
+            _parse_iso_timestamp(item.get("finishedAt") or item.get("startedAt")) or 0,
+            str(item.get("id") or ""),
+        )
+    )
+    return rows[-limit:]
+
+
+def summarize_book_history(book: dict[str, Any], mode: str) -> dict[str, Any]:
     recent_decisions = list(book.get("decisions", []))[-8:]
-    decision_timeline = [
+    archived_timeline = archived_decision_timeline(mode, book.get("sessionStartedAt"))
+    decision_timeline = archived_timeline or [
         {
             "id": item["id"],
             "startedAt": item["startedAt"],
             "finishedAt": item["finishedAt"],
             "actions": item["actions"],
+            "equityUsd": num(item.get("accountAfter", {}).get("equityUsd")),
         }
         for item in book.get("decisions", [])[-240:]
     ]
@@ -1543,8 +1598,8 @@ def summarize_trading_state() -> dict[str, Any]:
         "paperBook": state["paper"],
         "liveBook": state["live"],
         "activeBook": active_book,
-        "paperHistory": summarize_book_history(state["paper"]),
-        "liveHistory": summarize_book_history(state["live"]),
+        "paperHistory": summarize_book_history(state["paper"], "paper"),
+        "liveHistory": summarize_book_history(state["live"], "live"),
         "liveExecutionStatus": live_status_payload,
         "providerStatus": provider_status(),
     }
@@ -1607,10 +1662,16 @@ def reset_paper_account(mode: str = "full") -> dict[str, Any]:
         state["paper"]["initialCapitalUsd"] = settings["initialCapitalUsd"]
         state["paper"]["highWatermarkEquity"] = settings["initialCapitalUsd"]
         state["paper"]["openPositions"] = []
+        state["paper"]["openOrders"] = []
+        state["paper"]["closedTrades"] = []
+        state["paper"]["decisions"] = []
+        state["paper"]["lastDecisionAt"] = None
+        state["paper"]["sessionStartedAt"] = now_iso()
         state["paper"]["circuitBreakerTripped"] = False
         state["paper"]["circuitBreakerReason"] = None
     else:
         state["paper"] = empty_trading_account(settings["initialCapitalUsd"], "paper")
+        state["paper"]["sessionStartedAt"] = now_iso()
     state["adaptive"] = {
         "updatedAt": now_iso(),
         "notes": [

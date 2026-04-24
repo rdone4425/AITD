@@ -624,6 +624,9 @@ function liveClosedDisplaySource() {
       source: "exchange",
       records: exchangeRecords.map((trade) => ({
         symbol: trade.symbol,
+        side: trade.side || "",
+        quantity: trade.quantity,
+        notionalUsd: trade.notionalUsd,
         realizedPnl: trade.realizedPnl,
         closedAt: trade.closedAt,
         info: trade.info || "交易所已实现记录"
@@ -635,6 +638,9 @@ function liveClosedDisplaySource() {
     source: "local",
     records: localRecords.map((trade) => ({
       symbol: trade.symbol,
+      side: trade.side || "",
+      quantity: trade.quantity,
+      notionalUsd: trade.notionalUsd,
       realizedPnl: trade.realizedPnl,
       closedAt: trade.closedAt,
       info: trade.exitReason || "本地已同步平仓记录"
@@ -654,14 +660,19 @@ function groupedLiveClosedTrades() {
         symbol,
         totalRealized: 0,
         count: 0,
+        winCount: 0,
+        winRate: 0,
         latestClosedAt: null,
         trades: []
       });
     }
     const group = groups.get(symbol);
     const closedAt = trade.closedAt || null;
+    const realizedPnl = Number(trade.realizedPnl || 0);
     group.totalRealized += Number(trade.realizedPnl || 0);
     group.count += 1;
+    if (realizedPnl > 0) group.winCount += 1;
+    group.winRate = group.count ? (group.winCount / group.count) * 100 : 0;
     if (!group.latestClosedAt || compareSortValues(parseSortTime(closedAt), parseSortTime(group.latestClosedAt), "desc") < 0) {
       group.latestClosedAt = closedAt;
     }
@@ -672,6 +683,7 @@ function groupedLiveClosedTrades() {
     symbol: (item) => item.symbol,
     totalRealized: (item) => Number(item.totalRealized),
     count: (item) => Number(item.count),
+    winRate: (item) => Number(item.winRate),
     latestClosedAt: (item) => parseSortTime(item.latestClosedAt)
   };
   const getter = getters[sortState.key] || getters.latestClosedAt;
@@ -686,19 +698,50 @@ function groupedLiveClosedTrades() {
   };
 }
 
-function sortedPaperClosedTrades() {
+function groupedPaperClosedTrades() {
   const records = (activeHistory().closedTrades || []).slice();
-  const sortState = state.closedSort?.paper || { key: "closedAt", dir: "desc" };
+  const groups = new Map();
+  records.forEach((trade) => {
+    const symbol = String(trade.symbol || "").trim().toUpperCase();
+    if (!symbol) return;
+    if (!groups.has(symbol)) {
+      groups.set(symbol, {
+        symbol,
+        totalRealized: 0,
+        count: 0,
+        winCount: 0,
+        winRate: 0,
+        latestClosedAt: null,
+        trades: []
+      });
+    }
+    const group = groups.get(symbol);
+    const closedAt = trade.closedAt || null;
+    const realizedPnl = Number(trade.realizedPnl || 0);
+    group.totalRealized += realizedPnl;
+    group.count += 1;
+    if (realizedPnl > 0) group.winCount += 1;
+    group.winRate = group.count ? (group.winCount / group.count) * 100 : 0;
+    if (!group.latestClosedAt || compareSortValues(parseSortTime(closedAt), parseSortTime(group.latestClosedAt), "desc") < 0) {
+      group.latestClosedAt = closedAt;
+    }
+    group.trades.push(trade);
+  });
+  const sortState = state.closedSort?.paper || { key: "latestClosedAt", dir: "desc" };
   const getters = {
-    symbol: (item) => item.symbol || "",
-    side: (item) => item.side || "",
-    quantity: (item) => Number(item.quantity),
-    realizedPnl: (item) => Number(item.realizedPnl),
-    closedAt: (item) => parseSortTime(item.closedAt),
-    exitReason: (item) => item.exitReason || ""
+    symbol: (item) => item.symbol,
+    totalRealized: (item) => Number(item.totalRealized),
+    count: (item) => Number(item.count),
+    winRate: (item) => Number(item.winRate),
+    latestClosedAt: (item) => parseSortTime(item.latestClosedAt)
   };
-  const getter = getters[sortState.key] || getters.closedAt;
-  return records.sort((left, right) => compareSortValues(getter(left), getter(right), sortState.dir));
+  const getter = getters[sortState.key] || getters.latestClosedAt;
+  return Array.from(groups.values())
+    .map((group) => ({
+      ...group,
+      trades: group.trades.slice().sort((left, right) => compareSortValues(parseSortTime(left.closedAt), parseSortTime(right.closedAt), "desc"))
+    }))
+    .sort((left, right) => compareSortValues(getter(left), getter(right), sortState.dir));
 }
 
 function currentRunner() {
@@ -739,19 +782,42 @@ function latestCandidateUniverse() {
   return scanCandidates;
 }
 
+function candidateDiagnostics() {
+  const savedSymbols = Array.isArray(state.universe?.symbols) ? state.universe.symbols : [];
+  const candidates = latestCandidateUniverse();
+  const invalidSymbols = Array.isArray(state.scan?.candidateSource?.invalidSymbols) ? state.scan.candidateSource.invalidSymbols : [];
+  const skippedSymbols = Array.isArray(state.scan?.skippedSymbols) ? state.scan.skippedSymbols : [];
+  const validSymbolCount = Number.isFinite(Number(state.scan?.universeSize)) && Number(state.scan?.universeSize) > 0
+    ? Number(state.scan.universeSize)
+    : Math.max(0, savedSymbols.length - invalidSymbols.length);
+  return {
+    savedSymbols,
+    validSymbolCount,
+    opportunityCount: candidates.length,
+    invalidSymbols,
+    skippedSymbols
+  };
+}
+
 function latestScanOpportunities() {
   return Array.isArray(state.scan?.opportunities) ? state.scan.opportunities : [];
 }
 
 function buildEquitySeries() {
   const account = activeAccount();
+  const history = activeHistory();
   const book = activeBook();
-  const decisions = Array.isArray(book?.decisions) ? book.decisions : [];
+  const decisions = Array.isArray(history?.decisionTimeline) && history.decisionTimeline.length
+    ? history.decisionTimeline
+    : (Array.isArray(book?.decisions) ? book.decisions : []);
   const intervalMinutes = Math.max(1, Number(state.tradingSettings?.decisionIntervalMinutes || 5));
   const initial = Number(account.initialCapitalUsd || 0);
   const pointsBySlot = new Map();
   decisions.forEach((decision) => {
-    const equity = Number(decision?.accountAfter?.equityUsd);
+    const equity = Number(
+      decision?.equityUsd
+      ?? decision?.accountAfter?.equityUsd
+    );
     const actualAt = decision?.finishedAt || decision?.startedAt || null;
     const actualMs = parseTimeMs(actualAt);
     if (!Number.isFinite(equity) || actualMs === null) return;
@@ -1632,6 +1698,7 @@ function renderClosedPositions() {
             <span>${sortHeaderButton("Symbol", "closed-live", "symbol", sortState, "asc")}</span>
             <span>${sortHeaderButton("Realized", "closed-live", "totalRealized", sortState, "desc")}</span>
             <span>${sortHeaderButton("Count", "closed-live", "count", sortState, "desc")}</span>
+            <span>${sortHeaderButton("Win", "closed-live", "winRate", sortState, "desc")}</span>
             <span>${sortHeaderButton("Latest", "closed-live", "latestClosedAt", sortState, "desc")}</span>
           </div>
           ${groups.map((group) => `
@@ -1641,6 +1708,7 @@ function renderClosedPositions() {
                   <strong>${escapeHtml(group.symbol)}</strong>
                   <span class="${pnlClass(group.totalRealized)}">${escapeHtml(fmtSignedUsd(group.totalRealized))}</span>
                   <span>${escapeHtml(fmtNumber(group.count, 0))}</span>
+                  <span>${escapeHtml(fmtPct(group.winRate, 0))}</span>
                   <span>${escapeHtml(fmtDateTime(group.latestClosedAt))}</span>
                 </div>
               </summary>
@@ -1648,12 +1716,18 @@ function renderClosedPositions() {
                 <div class="compact-table bare-table">
                   <div class="compact-row compact-header compact-closed-live-detail-grid">
                     <span>Closed At</span>
+                    <span>Side</span>
+                    <span>Qty</span>
+                    <span>Notional</span>
                     <span>Realized</span>
                     <span>Note</span>
                   </div>
                   ${group.trades.map((trade) => `
                     <div class="compact-row compact-closed-live-detail-grid">
                       <span>${escapeHtml(fmtDateTime(trade.closedAt))}</span>
+                      <span>${trade.side ? `<span class="mode-tag ${escapeHtml(trade.side === "short" ? "short" : "long")}">${escapeHtml(String(trade.side).toUpperCase())}</span>` : "-"}</span>
+                      <span>${Number.isFinite(Number(trade.quantity)) ? escapeHtml(fmtNumber(trade.quantity, 4)) : "-"}</span>
+                      <span>${Number.isFinite(Number(trade.notionalUsd)) ? escapeHtml(fmtUsd(trade.notionalUsd)) : "-"}</span>
                       <span class="${pnlClass(trade.realizedPnl)}">${escapeHtml(fmtSignedUsd(trade.realizedPnl))}</span>
                       <span>${escapeHtml(trade.info || "交易所已实现记录")}</span>
                     </div>
@@ -1667,10 +1741,11 @@ function renderClosedPositions() {
     `;
     return;
   }
-  const records = sortedPaperClosedTrades();
-  const sortState = state.closedSort?.paper || { key: "closedAt", dir: "desc" };
-  els.closedPositionMeta.textContent = records.length ? `${records.length} 条已平仓记录` : "当前无已平仓记录";
-  if (!records.length) {
+  const groups = groupedPaperClosedTrades();
+  const totalCount = groups.reduce((sum, group) => sum + group.count, 0);
+  const sortState = state.closedSort?.paper || { key: "latestClosedAt", dir: "desc" };
+  els.closedPositionMeta.textContent = totalCount ? `${groups.length} 个品种，${totalCount} 条已平仓记录` : "当前无已平仓记录";
+  if (!groups.length) {
     els.closedPositionList.innerHTML = `<p class="empty">模拟盘还没有已平仓记录。</p>`;
     return;
   }
@@ -1679,21 +1754,45 @@ function renderClosedPositions() {
       <div class="compact-table bare-table">
         <div class="compact-row compact-header compact-closed-paper-grid">
           <span>${sortHeaderButton("Symbol", "closed-paper", "symbol", sortState, "asc")}</span>
-          <span>${sortHeaderButton("Side", "closed-paper", "side", sortState, "asc")}</span>
-          <span>${sortHeaderButton("Qty", "closed-paper", "quantity", sortState, "desc")}</span>
-          <span>${sortHeaderButton("Realized", "closed-paper", "realizedPnl", sortState, "desc")}</span>
-          <span>${sortHeaderButton("Closed At", "closed-paper", "closedAt", sortState, "desc")}</span>
-          <span>${sortHeaderButton("Reason", "closed-paper", "exitReason", sortState, "asc")}</span>
+          <span>${sortHeaderButton("Realized", "closed-paper", "totalRealized", sortState, "desc")}</span>
+          <span>${sortHeaderButton("Count", "closed-paper", "count", sortState, "desc")}</span>
+          <span>${sortHeaderButton("Win", "closed-paper", "winRate", sortState, "desc")}</span>
+          <span>${sortHeaderButton("Latest", "closed-paper", "latestClosedAt", sortState, "desc")}</span>
         </div>
-        ${records.map((trade) => `
-          <div class="compact-row compact-closed-paper-grid">
-            <strong>${escapeHtml(trade.symbol || "n/a")}</strong>
-            <span><span class="mode-tag ${escapeHtml(trade.side === "short" ? "short" : "long")}">${escapeHtml((trade.side || "long").toUpperCase())}</span></span>
-            <span>${escapeHtml(fmtNumber(trade.quantity, 4))}</span>
-            <span class="${pnlClass(trade.realizedPnl)}">${escapeHtml(fmtSignedUsd(trade.realizedPnl))}</span>
-            <span>${escapeHtml(fmtDateTime(trade.closedAt))}</span>
-            <span>${escapeHtml(trade.exitReason || "manual")}</span>
-          </div>
+        ${groups.map((group) => `
+          <details class="trade-symbol-entry">
+            <summary>
+              <div class="compact-row bare-summary-row compact-closed-paper-grid">
+                <strong>${escapeHtml(group.symbol)}</strong>
+                <span class="${pnlClass(group.totalRealized)}">${escapeHtml(fmtSignedUsd(group.totalRealized))}</span>
+                <span>${escapeHtml(fmtNumber(group.count, 0))}</span>
+                <span>${escapeHtml(fmtPct(group.winRate, 0))}</span>
+                <span>${escapeHtml(fmtDateTime(group.latestClosedAt))}</span>
+              </div>
+            </summary>
+            <div class="trade-symbol-body">
+              <div class="compact-table bare-table">
+                <div class="compact-row compact-header compact-closed-paper-detail-grid">
+                  <span>Closed At</span>
+                  <span>Side</span>
+                  <span>Qty</span>
+                  <span>Notional</span>
+                  <span>Realized</span>
+                  <span>Reason</span>
+                </div>
+                ${group.trades.map((trade) => `
+                  <div class="compact-row compact-closed-paper-detail-grid">
+                    <span>${escapeHtml(fmtDateTime(trade.closedAt))}</span>
+                    <span><span class="mode-tag ${escapeHtml(trade.side === "short" ? "short" : "long")}">${escapeHtml((trade.side || "long").toUpperCase())}</span></span>
+                    <span>${escapeHtml(fmtNumber(trade.quantity, 4))}</span>
+                    <span>${escapeHtml(fmtUsd(trade.notionalUsd))}</span>
+                    <span class="${pnlClass(trade.realizedPnl)}">${escapeHtml(fmtSignedUsd(trade.realizedPnl))}</span>
+                    <span>${escapeHtml(trade.exitReason || "manual")}</span>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+          </details>
         `).join("")}
       </div>
     </div>
@@ -1702,14 +1801,204 @@ function renderClosedPositions() {
 
 function renderCandidates() {
   const candidates = latestCandidateUniverse();
-  els.candidateMeta.textContent = candidates.length ? `${candidates.length} 个 symbols` : "没有候选数据";
+  const diagnostics = candidateDiagnostics();
+  const summaryParts = [
+    `已保存 ${diagnostics.savedSymbols.length} 个`,
+    `校验有效 ${diagnostics.validSymbolCount} 个`,
+    `当前机会池 ${diagnostics.opportunityCount} 个`
+  ];
+  els.candidateMeta.textContent = summaryParts.join(" · ");
+  const invalidBlock = diagnostics.invalidSymbols.length
+    ? `
+      <p class="meta">未进入机会池的无效 symbols：${escapeHtml(diagnostics.invalidSymbols.join("、"))}</p>
+    `
+    : "";
+  const skippedBlock = diagnostics.skippedSymbols.length
+    ? `
+      <p class="meta">已通过 symbol 校验但本轮未拉到行情：${escapeHtml(diagnostics.skippedSymbols.join("、"))}</p>
+    `
+    : "";
   if (!candidates.length) {
-    els.candidateList.innerHTML = `<p class="empty">先保存候选池配置或执行一轮交易决策。</p>`;
+    els.candidateList.innerHTML = `
+      ${invalidBlock}
+      ${skippedBlock}
+      <p class="empty">先保存候选池配置或执行一轮交易决策。</p>
+    `;
     return;
   }
   els.candidateList.innerHTML = `
+    ${invalidBlock}
+    ${skippedBlock}
     <div class="universe-symbol-list">
       ${candidates.map((candidate) => `<span class="symbol-chip">${escapeHtml(candidate.symbol)}</span>`).join("")}
+    </div>
+  `;
+}
+
+function normalizeDecisionOutputPayload(output) {
+  const payload = output && typeof output === "object" ? output : {};
+  return {
+    summary: String(payload.summary || "").trim(),
+    positionActions: Array.isArray(payload.positionActions)
+      ? payload.positionActions
+      : (Array.isArray(payload.position_actions) ? payload.position_actions : []),
+    entryActions: Array.isArray(payload.entryActions)
+      ? payload.entryActions
+      : (Array.isArray(payload.entry_actions) ? payload.entry_actions : []),
+    watchlist: Array.isArray(payload.watchlist) ? payload.watchlist : [],
+    providerStatus: payload.providerStatus && typeof payload.providerStatus === "object" ? payload.providerStatus : null,
+    liveExecutionStatus: payload.liveExecutionStatus && typeof payload.liveExecutionStatus === "object" ? payload.liveExecutionStatus : null,
+    raw: payload
+  };
+}
+
+function decisionBadgeTone(value, kind = "decision") {
+  const text = String(value || "").trim().toLowerCase();
+  if (kind === "side") {
+    if (text === "long") return "positive";
+    if (text === "short") return "danger";
+    return "neutral";
+  }
+  if (text === "open") return "positive";
+  if (text === "hold") return "neutral";
+  if (text === "update") return "active";
+  if (text === "reduce") return "warning";
+  if (text === "close") return "danger";
+  return "neutral";
+}
+
+function decisionBadge(label, tone = "neutral") {
+  return `<span class="decision-output-badge is-${escapeHtml(tone)}">${escapeHtml(label)}</span>`;
+}
+
+function decisionMetric(label, value, extraClass = "") {
+  return `
+    <div class="decision-output-metric ${extraClass}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </div>
+  `;
+}
+
+function renderPositionActionCard(action) {
+  const symbol = String(action?.symbol || "n/a").toUpperCase();
+  const decision = String(action?.decision || "hold").trim().toLowerCase() || "hold";
+  const side = String(action?.side || "").trim().toLowerCase();
+  const metrics = [];
+  if (decision === "reduce" && Number.isFinite(Number(action?.reduceFraction))) {
+    metrics.push(decisionMetric("减仓比例", fmtPct(Number(action.reduceFraction) * 100, 0)));
+  }
+  if (Number.isFinite(Number(action?.confidence))) {
+    metrics.push(decisionMetric("置信度", fmtPct(Number(action.confidence), 0)));
+  }
+  if (Number.isFinite(Number(action?.stopLoss))) {
+    metrics.push(decisionMetric("止损", fmtPrice(action.stopLoss)));
+  }
+  if (Number.isFinite(Number(action?.takeProfit))) {
+    metrics.push(decisionMetric("止盈", fmtPrice(action.takeProfit)));
+  }
+  return `
+    <article class="decision-output-card">
+      <div class="decision-output-card-head">
+        <strong>${escapeHtml(symbol)}</strong>
+        <div class="decision-output-badges">
+          ${decisionBadge(decision.toUpperCase(), decisionBadgeTone(decision))}
+          ${side ? decisionBadge(side.toUpperCase(), decisionBadgeTone(side, "side")) : ""}
+        </div>
+      </div>
+      <p class="decision-output-reason">${escapeHtml(action?.reason || "无说明")}</p>
+      ${metrics.length ? `<div class="decision-output-metrics">${metrics.join("")}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderEntryActionCard(action) {
+  const symbol = String(action?.symbol || "n/a").toUpperCase();
+  const side = String(action?.side || "").trim().toLowerCase();
+  const actionType = String(action?.action || "open").trim().toLowerCase() || "open";
+  const metrics = [];
+  if (Number.isFinite(Number(action?.confidence))) {
+    metrics.push(decisionMetric("置信度", fmtPct(Number(action.confidence), 0)));
+  }
+  if (Number.isFinite(Number(action?.stopLoss))) {
+    metrics.push(decisionMetric("止损", fmtPrice(action.stopLoss)));
+  }
+  if (Number.isFinite(Number(action?.takeProfit))) {
+    metrics.push(decisionMetric("止盈", fmtPrice(action.takeProfit)));
+  }
+  return `
+    <article class="decision-output-card">
+      <div class="decision-output-card-head">
+        <strong>${escapeHtml(symbol)}</strong>
+        <div class="decision-output-badges">
+          ${decisionBadge(actionType.toUpperCase(), decisionBadgeTone(actionType))}
+          ${side ? decisionBadge(side.toUpperCase(), decisionBadgeTone(side, "side")) : ""}
+        </div>
+      </div>
+      <p class="decision-output-reason">${escapeHtml(action?.reason || "无说明")}</p>
+      ${metrics.length ? `<div class="decision-output-metrics">${metrics.join("")}</div>` : ""}
+    </article>
+  `;
+}
+
+function renderWatchlistCard(item) {
+  const symbol = String(item?.symbol || "n/a").toUpperCase();
+  return `
+    <article class="decision-output-card">
+      <div class="decision-output-card-head">
+        <strong>${escapeHtml(symbol)}</strong>
+        <div class="decision-output-badges">
+          ${decisionBadge("WATCH", "neutral")}
+        </div>
+      </div>
+      <p class="decision-output-reason">${escapeHtml(item?.reason || "无说明")}</p>
+    </article>
+  `;
+}
+
+function renderDecisionCardSection(title, records, renderer, emptyText) {
+  const items = Array.isArray(records) ? records : [];
+  return `
+    <section class="decision-output-section">
+      <div class="decision-output-section-head">
+        <h4>${escapeHtml(title)}</h4>
+        <span>${escapeHtml(String(items.length))}</span>
+      </div>
+      ${items.length
+        ? `<div class="decision-output-grid">${items.map((item) => renderer(item)).join("")}</div>`
+        : `<p class="decision-output-empty">${escapeHtml(emptyText)}</p>`}
+    </section>
+  `;
+}
+
+function renderDecisionOutput(output) {
+  const normalized = normalizeDecisionOutputPayload(output);
+  const providerText = normalized.providerStatus
+    ? `${normalized.providerStatus.preset || "provider"} / ${normalized.providerStatus.model || "model"}`
+    : "";
+  const liveExec = normalized.liveExecutionStatus;
+  const liveExecText = liveExec
+    ? (liveExec.canExecute ? "实盘可执行" : "实盘未执行")
+    : "";
+  return `
+    <div class="decision-output-stack">
+      <section class="decision-summary-card">
+        <div class="decision-output-card-head">
+          <strong>摘要</strong>
+          <div class="decision-output-badges">
+            ${providerText ? decisionBadge(providerText, "active") : ""}
+            ${liveExecText ? decisionBadge(liveExecText, liveExec?.canExecute ? "positive" : "warning") : ""}
+          </div>
+        </div>
+        <p class="decision-output-summary">${escapeHtml(normalized.summary || "本轮没有额外摘要。")}</p>
+      </section>
+      ${renderDecisionCardSection("持仓动作", normalized.positionActions, renderPositionActionCard, "这轮没有持仓管理动作。")}
+      ${renderDecisionCardSection("开仓动作", normalized.entryActions, renderEntryActionCard, "这轮没有新开仓建议。")}
+      ${renderDecisionCardSection("观察列表", normalized.watchlist, renderWatchlistCard, "这轮没有额外观察标的。")}
+      <details class="decision-raw-json">
+        <summary>查看原始 JSON</summary>
+        <pre class="pre-block">${escapeHtml(JSON.stringify(normalized.raw || {}, null, 2))}</pre>
+      </details>
     </div>
   `;
 }
@@ -1757,7 +2046,7 @@ function renderDecisionLog() {
             </div>
           </div>
           <div class="decision-tab-panel is-active" data-decision-tab-panel="output">
-            <pre class="pre-block">${escapeHtml(JSON.stringify(decision.output || {}, null, 2))}</pre>
+            ${renderDecisionOutput(decision.output || {})}
           </div>
           <div class="decision-tab-panel" data-decision-tab-panel="prompt" hidden>
             <pre class="pre-block">${escapeHtml(decision.prompt || "")}</pre>
@@ -1907,19 +2196,20 @@ function renderUniverseTest() {
     els.universePreview.textContent = `测试失败：${test.error}`;
     return;
   }
-  els.universeTestMeta.textContent = `${test.mode === "python_function" ? "Python 动态获取" : "手动 symbols"} · ${test.count || 0} 个 symbols · ${test.durationMs || 0}ms`;
-  els.universePreview.textContent = JSON.stringify(
-    {
-      mode: test.mode,
-      count: test.count,
-      symbols: test.symbols || [],
-      invalidSymbols: test.invalidSymbols || [],
-      note: test.note || "",
-      stdout: test.stdout || ""
-    },
-    null,
-    2
-  );
+  const metaParts = [
+    test.mode === "python_function" ? "Python 动态获取" : "手动 symbols",
+    `${test.count || 0} 个 symbols`,
+    `${test.durationMs || 0}ms`
+  ];
+  const invalidCount = Array.isArray(test.invalidSymbols) ? test.invalidSymbols.length : 0;
+  if (invalidCount) metaParts.push(`无效 ${invalidCount} 个`);
+  if (test.note) metaParts.push(`备注：${test.note}`);
+  if (test.stdout) metaParts.push(`stdout 已输出`);
+  els.universeTestMeta.textContent = metaParts.join(" · ");
+  const outputSymbols = Array.isArray(test.symbols) ? test.symbols : [];
+  els.universePreview.textContent = outputSymbols.length
+    ? outputSymbols.join("\n")
+    : "函数返回了空 list。";
 }
 
 function renderLogs() {
