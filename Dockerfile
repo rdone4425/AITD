@@ -24,4 +24,4 @@ RUN mkdir -p data
 EXPOSE 8788
 
 # 启动命令
-CMD ["python", "run.py", "--port", "8788"]
+CMD ["python", "run.py", "--host", "0.0.0.0", "--port", "8788"]

@@ -59,7 +59,7 @@ DEFAULT_DASHBOARD_SETTINGS = {
     "version": 1,
     "updated": "2026-04-20",
     "timezone": "Asia/Shanghai",
-    "pageAutoRefreshSeconds": 600,
+    "pageAutoRefreshSeconds": 30,
     "marketAutoScanEnabled": True,
     "marketScanIntervalMinutes": 60,
     "marketScanOffsetMinute": 7,
@@ -93,7 +93,7 @@ DEFAULT_PROVIDER_SETTINGS = {
     "model": "gpt-5.4-mini",
     "baseUrl": "https://api.openai.com/v1",
     "apiKey": "",
-    "timeoutSeconds": 45,
+    "timeoutSeconds": 90,
     "temperature": 0.2,
     "maxOutputTokens": 1200,
     "anthropicVersion": "2023-06-01",
@@ -608,6 +608,9 @@ def _normalized_prompt_kline_feeds(raw_feeds: Any, legacy_intervals: Any = None)
                 "enabled": clean_bool(current.get("enabled"), defaults[interval]["enabled"]),
                 "limit": int(clamp(current.get("limit"), 1, 300)),
             }
+        if any(item["enabled"] for item in normalized.values()):
+            return normalized
+        normalized["15m"]["enabled"] = True
         return normalized
     enabled_from_legacy: set[str] = set()
     if isinstance(legacy_intervals, str):

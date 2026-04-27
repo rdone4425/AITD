@@ -13,9 +13,15 @@ def _parse_args() -> argparse.Namespace:
         default=8788,
         help="Port for the local dashboard server. Default: 8788",
     )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="",
+        help="Host to bind the server. Overrides config file. Default: use config value",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    start_server(port_override=args.port)
+    start_server(port_override=args.port, host_override=args.host or None)

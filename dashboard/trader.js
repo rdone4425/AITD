@@ -1167,6 +1167,9 @@ function normalizePromptKlineFeeds(value) {
       limit: Math.max(1, Math.min(300, Number(raw.limit || PROMPT_KLINE_FEED_DEFAULTS[interval].limit)))
     };
   });
+  if (!PROMPT_KLINE_FEED_OPTIONS.some((interval) => feeds[interval].enabled)) {
+    feeds["15m"].enabled = true;
+  }
   return feeds;
 }
 
@@ -1196,7 +1199,14 @@ function syncPromptKlineInputs() {
   });
 }
 
-function handlePromptKlineEnabledChange() {
+function handlePromptKlineEnabledChange(changedInterval) {
+  const feeds = currentPromptKlineFeeds();
+  const enabledIntervals = PROMPT_KLINE_FEED_OPTIONS.filter((interval) => feeds[interval].enabled);
+  if (!enabledIntervals.length) {
+    const fallback = changedInterval && PROMPT_KLINE_FEED_OPTIONS.includes(changedInterval) ? changedInterval : "15m";
+    const fallbackInput = els.promptKlineEnabledInputs.find((input) => input.dataset.promptKlineEnabled === fallback);
+    if (fallbackInput) fallbackInput.checked = true;
+  }
   syncPromptKlineInputs();
 }
 
@@ -1452,7 +1462,7 @@ function syncTradingSettingsForm() {
   els.minConfidenceInput.value = settings.minConfidence ?? 60;
   els.paperFeesInput.value = settings.paperFeesBps ?? 4;
   els.allowShortsInput.checked = settings.allowShorts !== false;
-  els.pageAutoRefreshInput.value = state.settings?.pageAutoRefreshSeconds ?? 600;
+  els.pageAutoRefreshInput.value = state.settings?.pageAutoRefreshSeconds ?? 60;
 }
 
 function syncProviderForm() {
@@ -1530,7 +1540,7 @@ function renderMeta() {
   const lastFinished = runner.lastFinishedAt ? fmtDateTime(runner.lastFinishedAt) : "尚未执行";
   const status = runner.running ? "正在执行" : "空闲";
   els.tradeRunMeta.textContent = `${modeName(mode)} · ${status} · 上次完成 ${lastFinished} · 下次调度 ${nextDue}`;
-  const refreshSeconds = state.settings?.pageAutoRefreshSeconds || 600;
+  const refreshSeconds = state.settings?.pageAutoRefreshSeconds || 30;
   els.tradeRefreshHint.textContent = `自动刷新 ${refreshSeconds} 秒`;
   els.toggleModeBtn.textContent = mode === "live" ? "查看模拟盘" : "查看实盘";
   els.resetBtn.hidden = false;
@@ -2263,7 +2273,7 @@ function renderAll() {
 
 function scheduleRefresh() {
   if (state.autoRefreshTimer) window.clearTimeout(state.autoRefreshTimer);
-  const delayMs = (state.settings?.pageAutoRefreshSeconds || 600) * 1000;
+  const delayMs = (state.settings?.pageAutoRefreshSeconds || 30) * 1000;
   state.autoRefreshTimer = window.setTimeout(loadData, delayMs);
 }
 
@@ -2458,7 +2468,7 @@ async function handleSaveTradingSettings(event) {
     allowShorts: els.allowShortsInput.checked
   };
   const dashboardPayload = {
-    pageAutoRefreshSeconds: Number(els.pageAutoRefreshInput.value || 600)
+    pageAutoRefreshSeconds: Number(els.pageAutoRefreshInput.value || 60)
   };
   if (els.saveTradingSettingsBtn) els.saveTradingSettingsBtn.disabled = true;
   els.settingsFeedback.textContent = "正在保存运行设置…";

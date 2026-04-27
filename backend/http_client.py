@@ -99,14 +99,23 @@ def request_text(
     for key, value in merged_headers.items():
         request.add_header(key, value)
     opener = _build_opener(url, network_settings or {})
-    try:
-        with opener.open(request, timeout=timeout_seconds) as response:
-            return response.read().decode("utf-8")
-    except HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise HttpRequestError(f"{error.code} {error.reason}: {detail}") from error
-    except URLError as error:
-        raise HttpRequestError(str(error.reason)) from error
+    import time
+    for attempt in range(3):
+        try:
+            with opener.open(request, timeout=timeout_seconds) as response:
+                return response.read().decode("utf-8")
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            if error.code >= 500 and attempt < 2:
+                time.sleep(1 * (attempt + 1))
+                continue
+            raise HttpRequestError(f"{error.code} {error.reason}: {detail}") from error
+        except URLError as error:
+            reason = str(error.reason)
+            if ("timed out" in reason.lower() or "timeout" in reason.lower()) and attempt < 2:
+                time.sleep(1 * (attempt + 1))
+                continue
+            raise HttpRequestError(reason) from error
 
 
 def request_json(
